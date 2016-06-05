@@ -18,6 +18,7 @@
 
 #include <string>
 #include <vector>
+#include <fstream>
 
 #include <process/once.hpp>
 
@@ -29,6 +30,7 @@
 
 using process::Once;
 
+using std::ifstream;
 using std::string;
 using std::vector;
 
@@ -79,9 +81,27 @@ Try<Nothing> extendLifetime(pid_t child)
     return Error("systemd is not enabled on this system");
   }
 
+  string systemdMesosExecutorsCgroup;
+
+  string systemdCgroupRoot;
+  string line;
+  std::ifstream in("/proc/1/cgroup");
+
+  while (std::getline(in, line)) {
+    vector<string> fields = strings::tokenize(line, ":");
+    if (fields.size() >= 3 && fields[1] == "name=systemd") {
+      systemdCgroupRoot = fields[2];
+      break;
+    }
+  }
+  in.close();
+
+  systemdMesosExecutorsCgroup =
+    path::join(systemdCgroupRoot, systemd::mesos::MESOS_EXECUTORS_SLICE);
+
   Try<Nothing> assign = cgroups::assign(
       hierarchy(),
-      systemd::mesos::MESOS_EXECUTORS_SLICE,
+      systemdMesosExecutorsCgroup,
       child);
 
   if (assign.isError()) {
@@ -93,7 +113,7 @@ Try<Nothing> extendLifetime(pid_t child)
   }
 
   LOG(INFO) << "Assigned child process '" << child << "' to '"
-            << systemd::mesos::MESOS_EXECUTORS_SLICE << "'";
+            << systemdMesosExecutorsCgroup << "'";
 
   return Nothing();
 }
@@ -145,6 +165,7 @@ Try<Nothing> initialize(const Flags& flags)
   // We explicitly don't modify the file if it exists in case operators want
   // to over-ride the settings for the slice that we provide when we create
   // the `Unit` below.
+
   const Path path(path::join(
       systemd::runtimeDirectory(),
       mesos::MESOS_EXECUTORS_SLICE));
@@ -173,11 +194,29 @@ Try<Nothing> initialize(const Flags& flags)
                  "': " + start.error());
   }
 
+  string systemdMesosExecutorsCgroup;
+
+  string systemdCgroupRoot;
+  string line;
+  std::ifstream in("/proc/1/cgroup");
+
+  while (std::getline(in, line)) {
+    vector<string> fields = strings::tokenize(line, ":");
+    if (fields.size() >= 3 && fields[1] == "name=systemd") {
+      systemdCgroupRoot = fields[2];
+      break;
+    }
+  }
+  in.close();
+
+  systemdMesosExecutorsCgroup =
+    path::join(systemdCgroupRoot, mesos::MESOS_EXECUTORS_SLICE);
+
   // Now the `MESOS_EXECUTORS_SLICE` is ready for us to assign any pids. We can
   // verify that our cgroups assignments will work by testing the hierarchy.
   Try<bool> exists = cgroups::exists(
       systemd::hierarchy(),
-      mesos::MESOS_EXECUTORS_SLICE);
+      systemdMesosExecutorsCgroup);
 
   if (exists.isError() || !exists.get()) {
     return Error("Failed to locate systemd cgroups hierarchy: " +

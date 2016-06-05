@@ -19,6 +19,8 @@
 
 #include <linux/sched.h>
 
+#include <fstream>
+#include <string>
 #include <vector>
 
 #include <process/collect.hpp>
@@ -42,6 +44,7 @@
 
 using namespace process;
 
+using std::ifstream;
 using std::list;
 using std::map;
 using std::set;
@@ -68,10 +71,12 @@ static ContainerID container(const string& cgroup)
 LinuxLauncher::LinuxLauncher(
     const Flags& _flags,
     const string& _freezerHierarchy,
-    const Option<string>& _systemdHierarchy)
+    const Option<string>& _systemdHierarchy,
+    const string& _systemdMesosExecutorsCgroup)
   : flags(_flags),
     freezerHierarchy(_freezerHierarchy),
-    systemdHierarchy(_systemdHierarchy) {}
+    systemdHierarchy(_systemdHierarchy),
+    systemdMesosExecutorsCgroup(_systemdMesosExecutorsCgroup) {}
 
 
 Try<Launcher*> LinuxLauncher::create(const Flags& flags)
@@ -108,12 +113,30 @@ Try<Launcher*> LinuxLauncher::create(const Flags& flags)
   // slice. It then migrates executor pids into this slice before it "unpauses"
   // the executor. This is the same pattern as the freezer.
 
+  string systemdMesosExecutorsCgroup;
+  string systemdCgroupRoot;
+  string line;
+  std::ifstream in("/proc/1/cgroup");
+
+  while (std::getline(in, line)) {
+    vector<string> fields = strings::tokenize(line, ":");
+    if (fields.size() >= 3 && fields[1] == "name=systemd") {
+      systemdCgroupRoot = fields[2];
+      break;
+    }
+  }
+  in.close();
+
+  systemdMesosExecutorsCgroup =
+      path::join(systemdCgroupRoot, systemd::mesos::MESOS_EXECUTORS_SLICE);
+
   return new LinuxLauncher(
       flags,
       freezerHierarchy.get(),
       systemd::enabled() ?
         Some(systemd::hierarchy()) :
-        Option<string>::none());
+        Option<string>::none(),
+        systemdMesosExecutorsCgroup);
 }
 
 
@@ -141,14 +164,14 @@ Future<hashset<ContainerID>> LinuxLauncher::recover(
   if (systemdHierarchy.isSome()) {
     mesosExecutorSlicePids = cgroups::processes(
         systemdHierarchy.get(),
-        systemd::mesos::MESOS_EXECUTORS_SLICE);
+        systemdMesosExecutorsCgroup);
 
     // If we error out trying to read the pids from the `MESOS_EXECUTORS_SLICE`
     // we fail. This is a programmer error as we did not set up the slice
     // correctly.
     if (mesosExecutorSlicePids.isError()) {
       return Failure("Failed to read pids from systemd '" +
-                     stringify(systemd::mesos::MESOS_EXECUTORS_SLICE) + "'");
+                     systemdMesosExecutorsCgroup + "'");
     }
   }
 
@@ -196,7 +219,7 @@ Future<hashset<ContainerID>> LinuxLauncher::recover(
       if (mesosExecutorSlicePids.get().count(pid) <= 0) {
         LOG(WARNING)
           << "Couldn't find pid '" << pid << "' in '"
-          << systemd::mesos::MESOS_EXECUTORS_SLICE << "'. This can lead to"
+          << systemdMesosExecutorsCgroup << "'. This can lead to"
           << " lack of proper resource isolation";
       }
     }
